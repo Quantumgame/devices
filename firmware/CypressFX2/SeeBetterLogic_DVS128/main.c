@@ -13,7 +13,6 @@ extern BOOL GotSUD;
 #define VR_CPLD_UPLOAD 0xBE
 #define VR_CPLD_CONFIG 0xBF
 #define VR_CHIP_BIAS 0xC0
-#define VR_CHIP_DIAG 0xC1
 
 // Request direction
 #define USB_DIRECTION_MASK (0x80)
@@ -40,13 +39,10 @@ static BYTE xdata doJTAGInit = TRUE;
 static BYTE xdata xsvfReturn = 0;
 static unsigned char xdata xsvfDataArray[XSVF_DATA_SIZE];
 
-// Support querying bias values and chip diag chain.
-#define BIAS_NUMBER 22
-#define BIAS_LENGTH	2
-static BYTE xdata currentBiasArray[BIAS_NUMBER][BIAS_LENGTH] = { { 0, 0 } };
-
-#define CHIP_DIAG_CHAIN_LENGTH 7
-static BYTE xdata currentChipDiagChain[CHIP_DIAG_CHAIN_LENGTH] = { 0 };
+// Support querying bias values (one big chain!).
+#define BIAS_NUMBER 12
+#define BIAS_LENGTH	3
+static BYTE xdata currentBiasArray[BIAS_NUMBER][BIAS_LENGTH] = { { 0, 0, 0 } };
 
 // Support arbitrary waits.
 static BYTE waitCounter = 0;
@@ -54,7 +50,6 @@ static BYTE waitCounter = 0;
 
 // Private functions.
 static void BiasWrite(BYTE byte);
-static void ChipDiagnosticChainWrite(BYTE xdata *config);
 static void ChipBiasWrite(BYTE xdata *config);
 static void SPIWrite(BYTE byte);
 static BYTE SPIRead(void);
@@ -108,12 +103,12 @@ void TD_Init(void) // Called once at startup
 	SYNCDELAY;
 	IOA = 0x00; // Keep all off
 	IOC = 0xB8; // JTAG disabled (TMS, TCK, TDI high), SPI SSN is active-low
-	IOE = 0x23; // Bias Clock, Latch and Address_Select are active-low
+	IOE = 0x16; // DVS Array Reset, Bias Clock, Bias Enable and Latch are active-low
 
 	SYNCDELAY;
-	OEA = 0x00; // 0000_0000, none are used
+	OEA = 0x88; // 1000_1000, CPLD_RESET and FXLED
 	OEC = 0x0E; // 0000_1110, JTAG (left floating) and SPI (but not SPI MISO)
-	OEE = 0xF7; // 1111_0111, Reset, FXLED and BIAS (but not PE3)
+	OEE = 0x3E; // 0011_1110, DVS Array Reset and BIAS
 
 	SYNCDELAY;
 	EP2CFG = 0xE0; // EP2 enabled, IN, bulk, quad-buffered -> 1110_0000
@@ -171,9 +166,9 @@ void TD_Init(void) // Called once at startup
 	I2CTL |= 0x01;  // set I2C to 400kHz to speed up data transfers
 
 	// Reset CPLD by pulsing reset line.
-	setPE(CPLD_RESET, 1);
+	CPLD_RESET = 1;
 	WAIT_FOR(20);
-	setPE(CPLD_RESET, 0);
+	CPLD_RESET = 0;
 }
 
 static void BiasWrite(BYTE byte) {
@@ -202,70 +197,21 @@ static void BiasWrite(BYTE byte) {
 	}
 }
 
-static void ChipDiagnosticChainWrite(BYTE xdata *config) {
-	// Update chip diag chain state.
-	currentChipDiagChain[0] = config[0];
-	currentChipDiagChain[1] = config[1];
-	currentChipDiagChain[2] = config[2];
-	currentChipDiagChain[3] = config[3];
-	currentChipDiagChain[4] = config[4];
-	currentChipDiagChain[5] = config[5];
-	currentChipDiagChain[6] = config[6];
-
-	// Ensure we are accessing the chip diagnostic shift register.
-	setPE(BIAS_DIAG_SELECT, 1);
-
-	// Write out all configuration bytes to the shift register.
-	BiasWrite(config[0]);
-	BiasWrite(config[1]);
-	BiasWrite(config[2]);
-	BiasWrite(config[3]);
-	BiasWrite(config[4]);
-	BiasWrite(config[5]);
-	BiasWrite(config[6]);
-
-	// Latch configuration.
-	setPE(BIAS_LATCH, 0);
-	WAIT_FOR(50);
-	setPE(BIAS_LATCH, 1);
-
-	// We're done and can deselect the chip diagnostic SR.
-	setPE(BIAS_DIAG_SELECT, 0);
-}
-
 static void ChipBiasWrite(BYTE xdata *config) {
+	BYTE i, j;
+
 	// Update bias state.
 	currentBiasArray[config[0]][0] = config[1];
 	currentBiasArray[config[0]][1] = config[2];
-
-	// Ensure we're not accessing the chip diagnostic shift register.
-	setPE(BIAS_DIAG_SELECT, 0);
-
-	// Select addressed bias mode (active-low).
-	setPE(BIAS_ADDR_SELECT, 0);
-
-	// Write a byte, containing the bias address.
-	BiasWrite(config[0]);
-
-	// Latch bias.
-	setPE(BIAS_LATCH, 0);
-	WAIT_FOR(50);
-	setPE(BIAS_LATCH, 1);
-
-	// Release address selection (active-low).
-	setPE(BIAS_ADDR_SELECT, 1);
-
-	// The first byte of a coarse/fine bias needs to have the coarse bits
-	// flipped and reversed. For DAVIS240, that's all biases below address 20.
-	if (config[0] < 20) {
-		// Reverse and flip coarse part.
-		config[1] = config[1] ^ 0x70;
-		config[1] = (config[1] & ~0x50) | ((config[1] & 0x40) >> 2) | ((config[1] & 0x10) << 2);
-	}
+	currentBiasArray[config[0]][2] = config[3];
 
 	// Write out all the data bytes for this bias.
-	BiasWrite(config[1]);
-	BiasWrite(config[2]);
+	// DVS128 has just one big chain, so we write out 'currentBiasArray' directly.
+	for (i = 0; i < BIAS_NUMBER; i++) {
+		for (j = 0; j < BIAS_LENGTH; j++) {
+			BiasWrite(currentBiasArray[i][j]);
+		}
+	}
 
 	// Latch bias.
 	setPE(BIAS_LATCH, 0);
@@ -334,7 +280,7 @@ static BOOL EEPROMWrite(WORD address, BYTE length, BYTE xdata *buf)
 	BYTE i;
 	BYTE xdata ee_str[3];
 
-	setPE(FXLED, 1);
+	FXLED = 1;
 
 	for (i = 0; i < length; i++) {
 		ee_str[0] = MSB(address);
@@ -343,7 +289,7 @@ static BOOL EEPROMWrite(WORD address, BYTE length, BYTE xdata *buf)
 
 		if (!EZUSB_WriteI2C(I2C_EEPROM_ADDRESS, 3, ee_str)) {
 			// Detect failure of I2C operation and stop, report it.
-  			setPE(FXLED, 0);
+  			FXLED = 0;
 			return (FALSE);
 		}
 		EZUSB_WaitForEEPROMWrite(I2C_EEPROM_ADDRESS);
@@ -351,7 +297,7 @@ static BOOL EEPROMWrite(WORD address, BYTE length, BYTE xdata *buf)
 		address++;
 	}
 
-	setPE(FXLED, 0);
+	FXLED = 0;
 	return (TRUE);
 }
 
@@ -360,14 +306,14 @@ static BOOL EEPROMRead(WORD address, BYTE length, BYTE xdata *buf)
 	BYTE i;
 	BYTE xdata ee_str[2];
 
-	setPE(FXLED, 1);
+	FXLED = 1;
 
 	ee_str[0] = MSB(address);
 	ee_str[1] = LSB(address);
 
 	if (!EZUSB_WriteI2C(I2C_EEPROM_ADDRESS, 2, ee_str)) {
 		// Detect failure of I2C operation and stop, report it.
-  		setPE(FXLED, 0);
+  		FXLED = 0;
 		return (FALSE);
 	}
 
@@ -378,11 +324,11 @@ static BOOL EEPROMRead(WORD address, BYTE length, BYTE xdata *buf)
 
 	if (!EZUSB_ReadI2C(I2C_EEPROM_ADDRESS, length, buf)) {
 		// Detect failure of I2C operation and stop, report it.
-  		setPE(FXLED, 0);
+  		FXLED = 0;
 		return (FALSE);
 	}
 
-	setPE(FXLED, 0);
+	FXLED = 0;
 	return (TRUE);
 }
 
@@ -449,32 +395,15 @@ void downloadConfigurationFromEEPROM(void)
 			continue;
 		}
 
-		// FX2 devices need the biases or the chip diagnostic chain to be
+		// FX2 DVS128 devices need the biases to be
 		// sent separately, using a different channel directly to chip.
 		if (config[0] == 5) { // SPI module address for biases is 5.
-			if (config[1] == 128) {
-				// To handle the chip diagnostic chain, we employ a simple trick.
-				// A bias module parameter address of 128 is used to signal we want
-				// to send the chip diagnostic chain, and we only store the three
-				// important bytes that contain configuration. The Muxes are always
-				// set to zero, since they are never used during normal operation.
-				xsvfDataArray[0] = 0x00;
-				xsvfDataArray[1] = 0x00;
-				xsvfDataArray[2] = config[3];
-				xsvfDataArray[3] = config[4];
-				xsvfDataArray[4] = config[5];
-				xsvfDataArray[5] = 0x00;
-				xsvfDataArray[6] = 0x00;
+			xsvfDataArray[0] = config[1];
+			xsvfDataArray[1] = config[3];
+			xsvfDataArray[2] = config[4];
+			xsvfDataArray[3] = config[5];
 
-				ChipDiagnosticChainWrite(xsvfDataArray);
-			}
-			else {
-				xsvfDataArray[0] = config[1];
-				xsvfDataArray[1] = config[4];
-				xsvfDataArray[2] = config[5];
-
-				ChipBiasWrite(xsvfDataArray);
-			}
+			ChipBiasWrite(xsvfDataArray);
 		}
 		else {
 			// Send configuration parameter to CPLD via SPI bus.
@@ -490,6 +419,15 @@ void downloadConfigurationFromEEPROM(void)
 			SPIWrite(config[5]);
 
 			CPLD_SPI_SSN = 1; // SSN is active-low.
+
+			// DVS Array Reset and Bias Enable have to be controlled directly
+			// from FX2 firmware on the DVS128 board, not through the CPLD.
+			// Their state depends on the DVS:Run configuration parameter,
+			// which is Module 1, Parameter 3.
+			if (config[0] == 1 && config[1] == 3) {
+				setPE(BIAS_ENABLE, !(config[5] & 0x01));
+				setPE(DVS_ARRAY_RESET, (config[5] & 0x01));
+			}
 		}
 	}
 }
@@ -501,7 +439,7 @@ void TD_Poll(void) // Called repeatedly while the device is idle
 BOOL TD_Suspend(void) // Called before the device goes into suspend mode
 {
 	// Put CPLD in reset, which disables everything.
-	setPE(CPLD_RESET, 1);
+	CPLD_RESET = 1;
 
 	return (TRUE);
 }
@@ -509,7 +447,7 @@ BOOL TD_Suspend(void) // Called before the device goes into suspend mode
 BOOL TD_Resume(void) // Called after the device resumes
 {
 	// Take CPLD out of reset, which permits usage again.
-	setPE(CPLD_RESET, 0);
+	CPLD_RESET = 0;
 
 	return (TRUE);
 }
@@ -626,6 +564,7 @@ BOOL DR_VendorCmnd(void) {
 
 			EP0BUF[0] = currentBiasArray[wValue][0];
 			EP0BUF[1] = currentBiasArray[wValue][1];
+			EP0BUF[2] = currentBiasArray[wValue][2];
 
 			EP0BCH = 0;
 			EP0BCL = BIAS_LENGTH;
@@ -670,61 +609,6 @@ BOOL DR_VendorCmnd(void) {
 
 			break;
 
-		case USB_REQ_DIR(VR_CHIP_DIAG, USB_DIRECTION_OUT):
-			// Verify length of data.
-			if (wLength != CHIP_DIAG_CHAIN_LENGTH) {
-				return (TRUE);
-			}
-
-			EP0BUF[0] = currentChipDiagChain[0];
-			EP0BUF[1] = currentChipDiagChain[1];
-			EP0BUF[2] = currentChipDiagChain[2];
-			EP0BUF[3] = currentChipDiagChain[3];
-			EP0BUF[4] = currentChipDiagChain[4];
-			EP0BUF[5] = currentChipDiagChain[5];
-			EP0BUF[6] = currentChipDiagChain[6];
-
-			EP0BCH = 0;
-			EP0BCL = CHIP_DIAG_CHAIN_LENGTH;
-
-			break;
-
-		case USB_REQ_DIR(VR_CHIP_DIAG, USB_DIRECTION_IN):
-			// Verify length of data.
-			if (wLength != CHIP_DIAG_CHAIN_LENGTH) {
-				return (TRUE);
-			}
-
-			currByteCount = 0;
-
-			while (wLength) {
-				// Get data from USB control endpoint.
-				// Move new data through EP0OUT, one packet at a time,
-				// eventually will get length down to zero by, for
-				// example, currByteCount = 64, 64, 15
-				// Clear bytecount to allow new data in, also stops NAKing
-				EP0BCH = 0;
-				EP0BCL = 0;
-				SYNCDELAY;
-
-				while (EP0CS & bmEPBUSY) {
-					;
-				} // Spin here until data arrives
-
-				for (i = 0; i < EP0BCL; i++) {
-					xsvfDataArray[currByteCount++] = EP0BUF[i];
-				}
-
-				wLength -= EP0BCL; // Decrement total byte count
-			}
-
-			ChipDiagnosticChainWrite(xsvfDataArray);
-
-			EP0BCH = 0;
-			EP0BCL = 0; // Re-arm end-point for OUT transfers.
-
-			break;
-
 		case USB_REQ_DIR(VR_CPLD_CONFIG, USB_DIRECTION_IN):
 			// Verify length of data.
 			if (wLength != 4) {
@@ -762,6 +646,15 @@ BOOL DR_VendorCmnd(void) {
 			}
 
 			CPLD_SPI_SSN = 1; // SSN is active-low.
+
+			// DVS Array Reset and Bias Enable have to be controlled directly
+			// from FX2 firmware on the DVS128 board, not through the CPLD.
+			// Their state depends on the DVS:Run configuration parameter,
+			// which is Module 1, Parameter 3.
+			if (wValue == 1 && wIndex == 3) {
+				setPE(BIAS_ENABLE, !(EP0BUF[i] & 0x01));
+				setPE(DVS_ARRAY_RESET, (EP0BUF[i] & 0x01));
+			}
 
 			EP0BCH = 0;
 			EP0BCL = 0; // Re-arm end-point for OUT transfers.
