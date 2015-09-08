@@ -8,12 +8,12 @@
 extern BOOL GotSUD;
 
 // Device-specific vendor requests
+#define VR_MS_FEATURE_DSCR 0xAF
 #define VR_EEPROM 0xBD
 #define VR_CPLD_UPLOAD 0xBE
 #define VR_CPLD_CONFIG 0xBF
 #define VR_CHIP_BIAS 0xC0
-#define VR_BIAS_ENABLE 0xC1
-#define VR_DVS_ARRAY_RESET 0xC2
+#define VR_CHIP_DIAG 0xC1
 
 // Request direction
 #define USB_DIRECTION_MASK (0x80)
@@ -26,6 +26,12 @@ extern BOOL GotSUD;
 #define	I2C_EEPROM_ADDRESS 0x51 // 0101_0001 is the address of the external serial EEPROM that holds FX2 program and static data
 #define EEPROM_SIZE (32 * 1024)
 #define SERIAL_NUMBER_LENGTH 8
+#define SERIAL_NUMBER_MEMORY_ADDRESS (EEPROM_SIZE - SERIAL_NUMBER_LENGTH)
+#define CONFIG_HEADER_LENGTH 8
+#define CONFIG_SINGLE_LENGTH 6
+#define CONFIG_MAX_NUMBER 500
+#define CONFIG_TOTAL_LENGTH (CONFIG_HEADER_LENGTH + (CONFIG_SINGLE_LENGTH * CONFIG_MAX_NUMBER))
+#define CONFIG_MEMORY_ADDRESS (SERIAL_NUMBER_MEMORY_ADDRESS - CONFIG_TOTAL_LENGTH)
 
 // XSVF support.
 #define XSVF_DATA_SIZE 512
@@ -34,18 +40,29 @@ static BYTE xdata doJTAGInit = TRUE;
 static BYTE xdata xsvfReturn = 0;
 static unsigned char xdata xsvfDataArray[XSVF_DATA_SIZE];
 
+// Support querying bias values and chip diag chain.
+#define BIAS_NUMBER 22
+#define BIAS_LENGTH	2
+static BYTE xdata currentBiasArray[BIAS_NUMBER][BIAS_LENGTH] = { { 0, 0 } };
+
+#define CHIP_DIAG_CHAIN_LENGTH 7
+static BYTE xdata currentChipDiagChain[CHIP_DIAG_CHAIN_LENGTH] = { 0 };
+
 // Support arbitrary waits.
 static BYTE waitCounter = 0;
 #define WAIT_FOR(CYCLES) for (waitCounter = 0; waitCounter < CYCLES; waitCounter++) { _nop_(); }
 
 // Private functions.
 static void BiasWrite(BYTE byte);
+static void ChipDiagnosticChainWrite(BYTE xdata *config);
+static void ChipBiasWrite(BYTE xdata *config);
 static void SPIWrite(BYTE byte);
 static BYTE SPIRead(void);
-static void EEPROMWrite(WORD address, BYTE length, BYTE xdata *buf);
-static void EEPROMRead(WORD address, BYTE length, BYTE xdata *buf);
+static BOOL EEPROMWrite(WORD address, BYTE length, BYTE xdata *buf);
+static BOOL EEPROMRead(WORD address, BYTE length, BYTE xdata *buf);
 
 void downloadSerialNumberFromEEPROM(void);
+void downloadConfigurationFromEEPROM(void);
 
 void TD_Init(void) // Called once at startup
 {
@@ -91,12 +108,12 @@ void TD_Init(void) // Called once at startup
 	SYNCDELAY;
 	IOA = 0x00; // Keep all off
 	IOC = 0xB8; // JTAG disabled (TMS, TCK, TDI high), SPI SSN is active-low
-	IOE = 0x23; // DVS Array Reset, Bias Enable and Latch are active-low
+	IOE = 0x23; // Bias Clock, Latch and Address_Select are active-low
 
 	SYNCDELAY;
-	OEA = 0x88; // 1000_1000, CPLD_RESET and FXLED
+	OEA = 0x00; // 0000_0000, none are used
 	OEC = 0x0E; // 0000_1110, JTAG (left floating) and SPI (but not SPI MISO)
-	OEE = 0x3E; // 0011_1110, DVS Array Reset and BIAS
+	OEE = 0xF7; // 1111_0111, Reset, FXLED and BIAS (but not PE3)
 
 	SYNCDELAY;
 	EP2CFG = 0xE0; // EP2 enabled, IN, bulk, quad-buffered -> 1110_0000
@@ -154,16 +171,16 @@ void TD_Init(void) // Called once at startup
 	I2CTL |= 0x01;  // set I2C to 400kHz to speed up data transfers
 
 	// Reset CPLD by pulsing reset line.
-	CPLD_RESET = 1;
+	setPE(CPLD_RESET, 1);
 	WAIT_FOR(20);
-	CPLD_RESET = 0;
+	setPE(CPLD_RESET, 0);
 }
 
 static void BiasWrite(BYTE byte) {
 	BYTE i;
 
-	// Disable clock.
-	setPE(BIAS_CLOCK, 0);
+	// Disable clock. Bias clock is active-low!
+	setPE(BIAS_CLOCK, 1);
 
 	// Step through the eight bits of the given byte, starting at the highest
 	// (MSB) and going down to the lowest (LSB).
@@ -177,12 +194,83 @@ static void BiasWrite(BYTE byte) {
 		}
 
 		// Pulse clock to signal value is ready to be read.
-		setPE(BIAS_CLOCK, 1);
 		setPE(BIAS_CLOCK, 0);
+		setPE(BIAS_CLOCK, 1);
 
 		// Shift left by one, making the second highest bit the highest.
 		byte = (byte << 1);
 	}
+}
+
+static void ChipDiagnosticChainWrite(BYTE xdata *config) {
+	// Update chip diag chain state.
+	currentChipDiagChain[0] = config[0];
+	currentChipDiagChain[1] = config[1];
+	currentChipDiagChain[2] = config[2];
+	currentChipDiagChain[3] = config[3];
+	currentChipDiagChain[4] = config[4];
+	currentChipDiagChain[5] = config[5];
+	currentChipDiagChain[6] = config[6];
+
+	// Ensure we are accessing the chip diagnostic shift register.
+	setPE(BIAS_DIAG_SELECT, 1);
+
+	// Write out all configuration bytes to the shift register.
+	BiasWrite(config[0]);
+	BiasWrite(config[1]);
+	BiasWrite(config[2]);
+	BiasWrite(config[3]);
+	BiasWrite(config[4]);
+	BiasWrite(config[5]);
+	BiasWrite(config[6]);
+
+	// Latch configuration.
+	setPE(BIAS_LATCH, 0);
+	WAIT_FOR(50);
+	setPE(BIAS_LATCH, 1);
+
+	// We're done and can deselect the chip diagnostic SR.
+	setPE(BIAS_DIAG_SELECT, 0);
+}
+
+static void ChipBiasWrite(BYTE xdata *config) {
+	// Update bias state.
+	currentBiasArray[config[0]][0] = config[1];
+	currentBiasArray[config[0]][1] = config[2];
+
+	// Ensure we're not accessing the chip diagnostic shift register.
+	setPE(BIAS_DIAG_SELECT, 0);
+
+	// Select addressed bias mode (active-low).
+	setPE(BIAS_ADDR_SELECT, 0);
+
+	// Write a byte, containing the bias address.
+	BiasWrite(config[0]);
+
+	// Latch bias.
+	setPE(BIAS_LATCH, 0);
+	WAIT_FOR(50);
+	setPE(BIAS_LATCH, 1);
+
+	// Release address selection (active-low).
+	setPE(BIAS_ADDR_SELECT, 1);
+
+	// The first byte of a coarse/fine bias needs to have the coarse bits
+	// flipped and reversed. For DAVIS240, that's all biases below address 20.
+	if (config[0] < 20) {
+		// Reverse and flip coarse part.
+		config[1] = config[1] ^ 0x70;
+		config[1] = (config[1] & ~0x50) | ((config[1] & 0x40) >> 2) | ((config[1] & 0x10) << 2);
+	}
+
+	// Write out all the data bytes for this bias.
+	BiasWrite(config[1]);
+	BiasWrite(config[2]);
+
+	// Latch bias.
+	setPE(BIAS_LATCH, 0);
+	WAIT_FOR(50);
+	setPE(BIAS_LATCH, 1);
 }
 
 static void SPIWrite(BYTE byte) {
@@ -241,47 +329,61 @@ static BYTE SPIRead(void) {
 	return (byte);
 }
 
-static void EEPROMWrite(WORD address, BYTE length, BYTE xdata *buf)
+static BOOL EEPROMWrite(WORD address, BYTE length, BYTE xdata *buf)
 {
 	BYTE i;
 	BYTE xdata ee_str[3];
 
-	FXLED = 1;
+	setPE(FXLED, 1);
 
 	for (i = 0; i < length; i++) {
 		ee_str[0] = MSB(address);
 		ee_str[1] = LSB(address);
 		ee_str[2] = buf[i];
 
-		EZUSB_WriteI2C(I2C_EEPROM_ADDRESS, 3, ee_str);
+		if (!EZUSB_WriteI2C(I2C_EEPROM_ADDRESS, 3, ee_str)) {
+			// Detect failure of I2C operation and stop, report it.
+  			setPE(FXLED, 0);
+			return (FALSE);
+		}
 		EZUSB_WaitForEEPROMWrite(I2C_EEPROM_ADDRESS);
 
 		address++;
 	}
 
-	FXLED = 0;
+	setPE(FXLED, 0);
+	return (TRUE);
 }
 
-static void EEPROMRead(WORD address, BYTE length, BYTE xdata *buf)
+static BOOL EEPROMRead(WORD address, BYTE length, BYTE xdata *buf)
 {
 	BYTE i;
 	BYTE xdata ee_str[2];
 
-	FXLED = 1;
+	setPE(FXLED, 1);
 
 	ee_str[0] = MSB(address);
 	ee_str[1] = LSB(address);
 
-	EZUSB_WriteI2C(I2C_EEPROM_ADDRESS, 2, ee_str);
+	if (!EZUSB_WriteI2C(I2C_EEPROM_ADDRESS, 2, ee_str)) {
+		// Detect failure of I2C operation and stop, report it.
+  		setPE(FXLED, 0);
+		return (FALSE);
+	}
 
 	// Set read buffer to known value.
 	for (i = 0; i < length; i++) {
 		buf[i] = 0xCD;
 	}
 
-	EZUSB_ReadI2C(I2C_EEPROM_ADDRESS, length, buf);
+	if (!EZUSB_ReadI2C(I2C_EEPROM_ADDRESS, length, buf)) {
+		// Detect failure of I2C operation and stop, report it.
+  		setPE(FXLED, 0);
+		return (FALSE);
+	}
 
-	FXLED = 0;
+	setPE(FXLED, 0);
+	return (TRUE);
 }
 
 // Get serial number from EEPROM.
@@ -295,13 +397,99 @@ void downloadSerialNumberFromEEPROM(void)
 	sNumDscrPtr = ((char *)EZUSB_GetStringDscr(3)) + 2;
 
 	// Read string description from EEPROM
-	EEPROMRead(EEPROM_SIZE - SERIAL_NUMBER_LENGTH, SERIAL_NUMBER_LENGTH, sNum);
+	if (!EEPROMRead(SERIAL_NUMBER_MEMORY_ADDRESS, SERIAL_NUMBER_LENGTH, sNum)) {
+		return;
+	}
 
 	// Write serial number string descriptor to RAM
 	for (i = 0; i < SERIAL_NUMBER_LENGTH; i++)
 	{
 		if (sNum[i] >= 32 && sNum[i] <= 126) {
 			sNumDscrPtr[i * 2] = sNum[i];
+		}
+	}
+}
+
+// Get configuration parameters from EEPROM and send them to CPLD.
+void downloadConfigurationFromEEPROM(void)
+{
+	BYTE xdata configHeader[CONFIG_HEADER_LENGTH];
+	BYTE xdata config[CONFIG_SINGLE_LENGTH];
+	WORD i, configNumber;
+
+	// Read number of configuration parameters from EEPROM.
+	// Each one takes up 6 bytes: 1 module addr, 1 param addr, 4 param.
+	if (!EEPROMRead(CONFIG_MEMORY_ADDRESS, CONFIG_HEADER_LENGTH, configHeader)) {
+		return;
+	}
+
+	// Check that the signature matches.
+	if (configHeader[0] != 'C' || configHeader[1] != 'O'
+	 || configHeader[2] != 'N' || configHeader[3] != 'F') {
+		return;
+	}
+
+	// Get the length of configurations. Since maximum length is 3000,
+	// and 3000 fits in 16bits, we only get a WORD.
+	configNumber = *(WORD xdata *) &configHeader[4];
+
+	// If there is nothing, return.
+	if (configNumber == 0) {
+		return;
+	}
+
+	// Calculate number of configurations.
+	configNumber = configNumber / CONFIG_SINGLE_LENGTH;
+
+	// Step through each config parameter, read it and send it to the device.
+	for (i = 0; i < configNumber; i++) {
+		// Read data from EEPROM.
+		if (!EEPROMRead((CONFIG_MEMORY_ADDRESS + CONFIG_HEADER_LENGTH) + (i * CONFIG_SINGLE_LENGTH),
+			CONFIG_SINGLE_LENGTH, config)) {
+			continue;
+		}
+
+		// FX2 devices need the biases or the chip diagnostic chain to be
+		// sent separately, using a different channel directly to chip.
+		if (config[0] == 5) { // SPI module address for biases is 5.
+			if (config[1] == 128) {
+				// To handle the chip diagnostic chain, we employ a simple trick.
+				// A bias module parameter address of 128 is used to signal we want
+				// to send the chip diagnostic chain, and we only store the three
+				// important bytes that contain configuration. The Muxes are always
+				// set to zero, since they are never used during normal operation.
+				xsvfDataArray[0] = 0x00;
+				xsvfDataArray[1] = 0x00;
+				xsvfDataArray[2] = config[3];
+				xsvfDataArray[3] = config[4];
+				xsvfDataArray[4] = config[5];
+				xsvfDataArray[5] = 0x00;
+				xsvfDataArray[6] = 0x00;
+
+				ChipDiagnosticChainWrite(xsvfDataArray);
+			}
+			else {
+				xsvfDataArray[0] = config[1];
+				xsvfDataArray[1] = config[4];
+				xsvfDataArray[2] = config[5];
+
+				ChipBiasWrite(xsvfDataArray);
+			}
+		}
+		else {
+			// Send configuration parameter to CPLD via SPI bus.
+			CPLD_SPI_SSN = 0; // SSN is active-low.
+
+			// Highest bit of first byte is zero to indicate write operation.
+			SPIWrite(config[0] & 0x7F);
+			SPIWrite(config[1]);
+
+			SPIWrite(config[2]);
+			SPIWrite(config[3]);
+			SPIWrite(config[4]);
+			SPIWrite(config[5]);
+
+			CPLD_SPI_SSN = 1; // SSN is active-low.
 		}
 	}
 }
@@ -313,7 +501,7 @@ void TD_Poll(void) // Called repeatedly while the device is idle
 BOOL TD_Suspend(void) // Called before the device goes into suspend mode
 {
 	// Put CPLD in reset, which disables everything.
-	CPLD_RESET = 1;
+	setPE(CPLD_RESET, 1);
 
 	return (TRUE);
 }
@@ -321,7 +509,7 @@ BOOL TD_Suspend(void) // Called before the device goes into suspend mode
 BOOL TD_Resume(void) // Called after the device resumes
 {
 	// Take CPLD out of reset, which permits usage again.
-	CPLD_RESET = 0;
+	setPE(CPLD_RESET, 0);
 
 	return (TRUE);
 }
@@ -370,8 +558,90 @@ BOOL DR_VendorCmnd(void) {
 	wRequest = USB_REQ_DIR(SETUPDAT[1], (SETUPDAT[0] & USB_DIRECTION_MASK));
 
 	switch (wRequest) {
+		case USB_REQ_DIR(VR_MS_FEATURE_DSCR, USB_DIRECTION_OUT):
+			if (wIndex == 0x0004) {
+				// Microsoft Compatible ID Feature Descriptor
+				// Request the WinUSB driver for our device, see https://github.com/pbatard/libwdi/wiki/WCID-Devices
+				EP0BUF[0] = 0x28; // Descriptor length, 4 bytes LE = 40 bytes
+				EP0BUF[1] = 0x00;
+				EP0BUF[2] = 0x00;
+				EP0BUF[3] = 0x00;
+				EP0BUF[4] = 0x00; // Version, 2 bytes LE = 1.0
+				EP0BUF[5] = 0x01;
+				EP0BUF[6] = 0x04; // Compatibility ID descriptor index, 2 bytes LE = 0x0004
+				EP0BUF[7] = 0x00;
+				EP0BUF[8] = 0x01; // Number of sections, 1 byte = 1 section
+				EP0BUF[9] = 0x00; // RESERVED, 7 bytes
+				EP0BUF[10] = 0x00;
+				EP0BUF[11] = 0x00;
+				EP0BUF[12] = 0x00;
+				EP0BUF[13] = 0x00;
+				EP0BUF[14] = 0x00;
+				EP0BUF[15] = 0x00;
+				EP0BUF[16] = 0x00; // Interface Number, 1 byte = Interface #0
+				EP0BUF[17] = 0x01; // RESERVED, 1 byte
+				EP0BUF[18] = 0x57; // Compatible ID, 8 bytes ASCII string = WINUSB\0\0
+				EP0BUF[19] = 0x49;
+				EP0BUF[20] = 0x4E;
+				EP0BUF[21] = 0x55;
+				EP0BUF[22] = 0x53;
+				EP0BUF[23] = 0x42;
+				EP0BUF[24] = 0x00;
+				EP0BUF[25] = 0x00;
+				EP0BUF[26] = 0x00; // Sub-compatible ID, 8 bytes ASCII string (unused)
+				EP0BUF[27] = 0x00;
+				EP0BUF[28] = 0x00;
+				EP0BUF[29] = 0x00;
+				EP0BUF[30] = 0x00;
+				EP0BUF[31] = 0x00;
+				EP0BUF[32] = 0x00;
+				EP0BUF[33] = 0x00;
+				EP0BUF[34] = 0x00; // RESERVED, 6 bytes
+				EP0BUF[35] = 0x00;
+				EP0BUF[36] = 0x00;
+				EP0BUF[37] = 0x00;
+				EP0BUF[38] = 0x00;
+				EP0BUF[39] = 0x00;
+
+				// Ensure correct length is sent back.
+				if (wLength > 40) {
+					wLength = 40;
+				}
+
+				EP0BCH = 0;
+				EP0BCL = wLength;
+			}
+			else {
+				// Stall on invalid MS feature descriptor request.
+				return (TRUE);
+			}
+
+			break;
+
+		case USB_REQ_DIR(VR_CHIP_BIAS, USB_DIRECTION_OUT):
+			// Verify length of data.
+			if (wLength != BIAS_LENGTH || wValue >= BIAS_NUMBER) {
+				return (TRUE);
+			}
+
+			EP0BUF[0] = currentBiasArray[wValue][0];
+			EP0BUF[1] = currentBiasArray[wValue][1];
+
+			EP0BCH = 0;
+			EP0BCL = BIAS_LENGTH;
+
+			break;
+
 		case USB_REQ_DIR(VR_CHIP_BIAS, USB_DIRECTION_IN):
-			// Write out all the data bytes for this bias.
+			// Verify length of data.
+			if (wLength != BIAS_LENGTH || wValue >= BIAS_NUMBER) {
+				return (TRUE);
+			}
+
+			currByteCount = 0;
+
+			xsvfDataArray[currByteCount++] = wValue;
+
 			while (wLength) {
 				// Get data from USB control endpoint.
 				// Move new data through EP0OUT, one packet at a time,
@@ -386,47 +656,69 @@ BOOL DR_VendorCmnd(void) {
 					;
 				} // Spin here until data arrives
 
-				currByteCount = EP0BCL; // Get the new byte count
-
-				for (i = 0; i < currByteCount; i++) {
-					BiasWrite(EP0BUF[i]);
+				for (i = 0; i < EP0BCL; i++) {
+					xsvfDataArray[currByteCount++] = EP0BUF[i];
 				}
 
-				wLength -= currByteCount; // Decrement total byte count
+				wLength -= EP0BCL; // Decrement total byte count
 			}
 
-			// Latch bias.
-			setPE(BIAS_LATCH, 0);
-			WAIT_FOR(50);
-			setPE(BIAS_LATCH, 1);
+			ChipBiasWrite(xsvfDataArray);
 
 			EP0BCH = 0;
 			EP0BCL = 0; // Re-arm end-point for OUT transfers.
 
 			break;
 
-		case USB_REQ_DIR(VR_BIAS_ENABLE, USB_DIRECTION_IN):
-			// Active-low signal!
-			if (wValue == 1) {
-				setPE(BIAS_ENABLE, 0);
-			}
-			else {
-				setPE(BIAS_ENABLE, 1);
+		case USB_REQ_DIR(VR_CHIP_DIAG, USB_DIRECTION_OUT):
+			// Verify length of data.
+			if (wLength != CHIP_DIAG_CHAIN_LENGTH) {
+				return (TRUE);
 			}
 
+			EP0BUF[0] = currentChipDiagChain[0];
+			EP0BUF[1] = currentChipDiagChain[1];
+			EP0BUF[2] = currentChipDiagChain[2];
+			EP0BUF[3] = currentChipDiagChain[3];
+			EP0BUF[4] = currentChipDiagChain[4];
+			EP0BUF[5] = currentChipDiagChain[5];
+			EP0BUF[6] = currentChipDiagChain[6];
+
 			EP0BCH = 0;
-			EP0BCL = 0; // Re-arm end-point for OUT transfers.
+			EP0BCL = CHIP_DIAG_CHAIN_LENGTH;
 
 			break;
 
-		case USB_REQ_DIR(VR_DVS_ARRAY_RESET, USB_DIRECTION_IN):
-			// Active-low signal!
-			if (wValue == 1) {
-				setPE(DVS_ARRAY_RESET, 0);
+		case USB_REQ_DIR(VR_CHIP_DIAG, USB_DIRECTION_IN):
+			// Verify length of data.
+			if (wLength != CHIP_DIAG_CHAIN_LENGTH) {
+				return (TRUE);
 			}
-			else {
-				setPE(DVS_ARRAY_RESET, 1);
+
+			currByteCount = 0;
+
+			while (wLength) {
+				// Get data from USB control endpoint.
+				// Move new data through EP0OUT, one packet at a time,
+				// eventually will get length down to zero by, for
+				// example, currByteCount = 64, 64, 15
+				// Clear bytecount to allow new data in, also stops NAKing
+				EP0BCH = 0;
+				EP0BCL = 0;
+				SYNCDELAY;
+
+				while (EP0CS & bmEPBUSY) {
+					;
+				} // Spin here until data arrives
+
+				for (i = 0; i < EP0BCL; i++) {
+					xsvfDataArray[currByteCount++] = EP0BUF[i];
+				}
+
+				wLength -= EP0BCL; // Decrement total byte count
 			}
+
+			ChipDiagnosticChainWrite(xsvfDataArray);
 
 			EP0BCH = 0;
 			EP0BCL = 0; // Re-arm end-point for OUT transfers.
@@ -434,6 +726,11 @@ BOOL DR_VendorCmnd(void) {
 			break;
 
 		case USB_REQ_DIR(VR_CPLD_CONFIG, USB_DIRECTION_IN):
+			// Verify length of data.
+			if (wLength != 4) {
+				return (TRUE);
+			}
+
 			// Write out all configuration bytes to the FPGA, using its SPI bus.
 			CPLD_SPI_SSN = 0; // SSN is active-low.
 
@@ -472,6 +769,11 @@ BOOL DR_VendorCmnd(void) {
 			break;
 
 		case USB_REQ_DIR(VR_CPLD_CONFIG, USB_DIRECTION_OUT):
+			// Verify length of data.
+			if (wLength != 4) {
+				return (TRUE);
+			}
+
 			// Read configuration bits from the FPGA, using its SPI bus.
 			CPLD_SPI_SSN = 0; // SSN is active-low.
 
@@ -525,7 +827,9 @@ BOOL DR_VendorCmnd(void) {
 
 				currByteCount = EP0BCL; // Get the new byte count
 
-				EEPROMWrite(wValue, currByteCount, EP0BUF);
+				if (!EEPROMWrite(wValue, currByteCount, EP0BUF)) {
+					return (TRUE); // Error, exit and stall EP.
+				}
 
 				wValue += currByteCount;
 
@@ -552,7 +856,9 @@ BOOL DR_VendorCmnd(void) {
 					currByteCount = EP0BUFF_SIZE;
 				}
 
-				EEPROMRead(wValue, currByteCount, EP0BUF);
+				if (!EEPROMRead(wValue, currByteCount, EP0BUF)) {
+					return (TRUE); // Error, exit and stall EP.
+				}
 
 				wValue += currByteCount;
 
@@ -633,8 +939,14 @@ BOOL DR_VendorCmnd(void) {
 			break;
 
 		case USB_REQ_DIR(VR_CPLD_UPLOAD, USB_DIRECTION_OUT):
+			// Verify length of data.
+			if (wLength != 2) {
+				return (TRUE);
+			}
+
 			EP0BUF[0] = VR_CPLD_UPLOAD;
-			EP0BUF[1]= xsvfReturn;
+			EP0BUF[1] = xsvfReturn;
+
 			EP0BCH = 0;
 			EP0BCL = 2;
 

@@ -42,7 +42,7 @@ Depends on fx2regs.h
 #define FXLED PA7
 
 #define DVS_ARRAY_RESET PE5 // is active-low
-#define BIAS_CLOCK PE4
+#define BIAS_CLOCK PE4 // is active-low
 #define BIAS_BIT PE3
 #define BIAS_ENABLE PE2 // is active-low
 #define BIAS_LATCH PE1 // is active-low

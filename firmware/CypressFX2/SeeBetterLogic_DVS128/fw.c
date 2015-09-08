@@ -27,7 +27,10 @@ WORD   pHighSpeedConfigDscr;
 WORD   pFullSpeedConfigDscr;   
 WORD   pConfigDscr;
 WORD   pOtherConfigDscr;   
-WORD   pStringDscr;   
+WORD   pStringDscr;
+WORD   pMSOSStringDscr;
+
+extern code STRINGDSCR MSOSStringDscr;
 
 //-----------------------------------------------------------------------------
 // Prototypes
@@ -39,6 +42,7 @@ BOOL TD_Suspend(void);
 BOOL TD_Resume(void);
 
 void downloadSerialNumberFromEEPROM(void);
+void downloadConfigurationFromEEPROM(void);
 
 BOOL DR_GetDescriptor(void);
 BOOL DR_SetConfiguration(void);
@@ -90,6 +94,7 @@ void main(void)
    pHighSpeedConfigDscr = (WORD)&HighSpeedConfigDscr;
    pFullSpeedConfigDscr = (WORD)&FullSpeedConfigDscr;
    pStringDscr = (WORD)&StringDscr;
+   pMSOSStringDscr = (WORD)&MSOSStringDscr;
 
    EZUSB_IRQ_ENABLE(); // Enable USB interrupt (INT2)
 
@@ -97,6 +102,12 @@ void main(void)
 
    USBIE |= bmSUDAV | bmSUTOK | bmURES | bmHSGRANT; // Enable selected interrupts
    EA = 1; // Enable 8051 interrupts
+
+   // Download the serial number from the EEPROM
+   downloadSerialNumberFromEEPROM();
+
+   // Load configuration parameters from EEPROM to CPLD.
+   downloadConfigurationFromEEPROM();
 
 #ifndef NO_RENUM
    // Renumerate if necessary.  Do this by checking the renum bit.  If it
@@ -117,9 +128,6 @@ void main(void)
 
    // Clear the Sleep flag.
    Sleep = FALSE;
-
-   // Download the serial number from the EEPROM
-   downloadSerialNumberFromEEPROM();
 
    // Task Dispatcher
    while(TRUE)               // Main Loop
@@ -202,13 +210,21 @@ void SetupCommand(void)
                   SUDPTRL = LSB(pOtherConfigDscr);
                   break;
                case GD_STRING:            // String
-                  if(dscr_ptr = (void *)EZUSB_GetStringDscr(SETUPDAT[2]))
+                  if(SETUPDAT[2] == 0xEE)
                   {
-                     SUDPTRH = MSB(dscr_ptr);
-                     SUDPTRL = LSB(dscr_ptr);
+                     SUDPTRH = MSB(pMSOSStringDscr);
+                     SUDPTRL = LSB(pMSOSStringDscr);
                   }
-                  else 
-                     EZUSB_STALL_EP0();   // Stall End Point 0
+				  else
+				  {
+				      if(dscr_ptr = (void *)EZUSB_GetStringDscr(SETUPDAT[2]))
+                      {
+                          SUDPTRH = MSB(dscr_ptr);
+                          SUDPTRL = LSB(dscr_ptr);
+                      }
+                      else 
+                          EZUSB_STALL_EP0();   // Stall End Point 0
+				  }	
                   break;
                default:            // Invalid request
                   EZUSB_STALL_EP0();      // Stall End Point 0
