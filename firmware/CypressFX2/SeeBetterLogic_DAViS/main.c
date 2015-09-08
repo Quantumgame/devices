@@ -40,6 +40,14 @@ static BYTE xdata doJTAGInit = TRUE;
 static BYTE xdata xsvfReturn = 0;
 static unsigned char xdata xsvfDataArray[XSVF_DATA_SIZE];
 
+// Support querying bias values and chip diag chain.
+#define BIAS_NUMBER 22
+#define BIAS_LENGTH	2
+static BYTE xdata currentBiasArray[BIAS_NUMBER][BIAS_LENGTH] = { { 0, 0 } };
+
+#define CHIP_DIAG_CHAIN_LENGTH 7
+static BYTE xdata currentChipDiagChain[CHIP_DIAG_CHAIN_LENGTH] = { 0 };
+
 // Support arbitrary waits.
 static BYTE waitCounter = 0;
 #define WAIT_FOR(CYCLES) for (waitCounter = 0; waitCounter < CYCLES; waitCounter++) { _nop_(); }
@@ -195,6 +203,15 @@ static void BiasWrite(BYTE byte) {
 }
 
 static void ChipDiagnosticChainWrite(BYTE xdata *config) {
+	// Update chip diag chain state.
+	currentChipDiagChain[0] = config[0];
+	currentChipDiagChain[1] = config[1];
+	currentChipDiagChain[2] = config[2];
+	currentChipDiagChain[3] = config[3];
+	currentChipDiagChain[4] = config[4];
+	currentChipDiagChain[5] = config[5];
+	currentChipDiagChain[6] = config[6];
+
 	// Ensure we are accessing the chip diagnostic shift register.
 	setPE(BIAS_DIAG_SELECT, 1);
 
@@ -217,6 +234,10 @@ static void ChipDiagnosticChainWrite(BYTE xdata *config) {
 }
 
 static void ChipBiasWrite(BYTE xdata *config) {
+	// Update bias state.
+	currentBiasArray[config[0]][0] = config[1];
+	currentBiasArray[config[0]][1] = config[2];
+
 	// Ensure we're not accessing the chip diagnostic shift register.
 	setPE(BIAS_DIAG_SELECT, 0);
 
@@ -431,9 +452,9 @@ void downloadConfigurationFromEEPROM(void)
 		// FX2 devices need the biases or the chip diagnostic chain to be
 		// sent separately, using a different channel directly to chip.
 		if (config[0] == 5) { // SPI module address for biases is 5.
-			if (config[1] == 32) {
+			if (config[1] == 128) {
 				// To handle the chip diagnostic chain, we employ a simple trick.
-				// A bias module parameter address of 32 is used to signal we want
+				// A bias module parameter address of 128 is used to signal we want
 				// to send the chip diagnostic chain, and we only store the three
 				// important bytes that contain configuration. The Muxes are always
 				// set to zero, since they are never used during normal operation.
@@ -597,9 +618,23 @@ BOOL DR_VendorCmnd(void) {
 
 			break;
 
+		case USB_REQ_DIR(VR_CHIP_BIAS, USB_DIRECTION_OUT):
+			// Verify length of data.
+			if (wLength != BIAS_LENGTH || wValue >= BIAS_NUMBER) {
+				return (TRUE);
+			}
+
+			EP0BUF[0] = currentBiasArray[wValue][0];
+			EP0BUF[1] = currentBiasArray[wValue][1];
+
+			EP0BCH = 0;
+			EP0BCL = BIAS_LENGTH;
+
+			break;
+
 		case USB_REQ_DIR(VR_CHIP_BIAS, USB_DIRECTION_IN):
 			// Verify length of data.
-			if (wLength != 2) {
+			if (wLength != BIAS_LENGTH || wValue >= BIAS_NUMBER) {
 				return (TRUE);
 			}
 
@@ -635,9 +670,28 @@ BOOL DR_VendorCmnd(void) {
 
 			break;
 
+		case USB_REQ_DIR(VR_CHIP_DIAG, USB_DIRECTION_OUT):
+			// Verify length of data.
+			if (wLength != CHIP_DIAG_CHAIN_LENGTH) {
+				return (TRUE);
+			}
+
+			EP0BUF[0] = currentChipDiagChain[0];
+			EP0BUF[1] = currentChipDiagChain[1];
+			EP0BUF[2] = currentChipDiagChain[2];
+			EP0BUF[3] = currentChipDiagChain[3];
+			EP0BUF[4] = currentChipDiagChain[4];
+			EP0BUF[5] = currentChipDiagChain[5];
+			EP0BUF[6] = currentChipDiagChain[6];
+
+			EP0BCH = 0;
+			EP0BCL = CHIP_DIAG_CHAIN_LENGTH;
+
+			break;
+
 		case USB_REQ_DIR(VR_CHIP_DIAG, USB_DIRECTION_IN):
 			// Verify length of data.
-			if (wLength != 7) {
+			if (wLength != CHIP_DIAG_CHAIN_LENGTH) {
 				return (TRUE);
 			}
 
