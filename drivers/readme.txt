@@ -35,7 +35,7 @@ The current assignements are as follows for the Thesycon PIDs
 0x840B SeeBetter
 0x840C SeeBetter20
 0x840D SBret10
-0x840E 
+0x840E Silicon Eye Rhino 1.0 (tobi added 21.6.16 in for insightness prototype)
 0x840F 
 
 0x8410 SimpleAESequencer
