@@ -63,7 +63,7 @@ void waitTime(long microsec)
 {
 	long i;
 
-    /* This implementation follows the Xilinx guidelines above and implements
+	/* This implementation follows the Xilinx guidelines above and implements
 	   the REQUIRED and the RECOMMENDED portion, at least for values below
 	   1 million (1 second). Above that, we only respect the REQUIRED portion,
 	   because the slow-down would be unacceptable. FX2 takes about 10 actual
@@ -72,9 +72,14 @@ void waitTime(long microsec)
 		microsec /= 10;
 	}
 
-    for (i = 0; i < microsec; ++i)
-    {
-        setPort( TCK, 0 );
-		setPort( TCK, 1 );
-    }
+	// Ensure initial state is high (default TCK state).
+	setPort(TCK, 1);
+
+	// Pulse for $microsec times. FX2 is slow, so each pulse takes >1 us.
+	for (i = 0; i < microsec; ++i) {
+		setPort(TCK, 0);
+		setPort(TCK, 1);
+	}
+
+	// Final state is high (default TCK state).
 }
