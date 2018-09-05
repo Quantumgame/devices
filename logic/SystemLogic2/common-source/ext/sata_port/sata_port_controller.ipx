@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DiamondModule name="sata_port_controller" module="sata_port_controller" VendorName="Lattice Semiconductor Corporation" generator="IPexpress" date="2017 02 09 14:24:52.167" version="8.2" type="Module" synthesis="synplify" source_format="VHDL">
+  <Package>
+		<File name="sata_port_controller.lpc" type="lpc" modified="2017 02 09 14:24:49.633"/>
+		<File name="sata_port_controller.pp" type="pp" modified="2017 02 09 14:24:49.636"/>
+		<File name="sata_port_controller.sym" type="sym" modified="2017 02 09 14:24:50.084"/>
+		<File name="sata_port_controller.tft" type="tft" modified="2017 02 09 14:24:49.674"/>
+		<File name="sata_port_controller.txt" type="pcs_module" modified="2017 02 09 14:24:49.677"/>
+		<File name="sata_port_controller.vhd" type="top_level_vhdl" modified="2017 02 09 14:24:49.673"/>
+  </Package>
+</DiamondModule>

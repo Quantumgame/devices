@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<com.sigasi.hdt.shared.librarymapping.model:LibraryMappings xmlns:com.sigasi.hdt.shared.librarymapping.model="com.sigasi.hdt.vhdl.scoping.librarymapping" Version="2">
+  <Mappings Location="Common Libraries/IEEE" Library="ieee"/>
+  <Mappings Location="Common Libraries/IEEE Synopsys" Library="ieee"/>
+  <Mappings Location="Common Libraries" Library="not mapped"/>
+  <Mappings Location="SystemLogic2_MachXO3_DAVIS346" Library="not mapped"/>
+  <Mappings Location="SystemLogic2_MachXO3_DAVIS346_tcr.dir" Library="not mapped"/>
+  <Mappings Location="common-source/APSADCStateMachineExternal.vhd" Library="not mapped"/>
+  <Mappings Location="common-source/chipdefs/aercorrfilter" Library="not mapped"/>
+  <Mappings Location="common-source/chipdefs/cochlealp" Library="not mapped"/>
+  <Mappings Location="common-source/chipdefs/cochleatow4ear" Library="not mapped"/>
+  <Mappings Location="common-source/chipdefs/sampleprob" Library="not mapped"/>
+  <Mappings Location="common-source/ext/FIFODualClockDoubleECP3" Library="not mapped"/>
+  <Mappings Location="common-source/ext/PLL.vhd" Library="not mapped"/>
+  <Mappings Location="common-source/ext/sata_port/._Real_._Math_.vhd" Library="not mapped"/>
+  <Mappings Location="common-source/ext/sata_port/sata_port_controller.vhd" Library="not mapped"/>
+  <Mappings Location="private-source/Settings_DAVIS640.vhd" Library="not mapped"/>
+  <Mappings Location="private-source/pll_100" Library="not mapped"/>
+  <Mappings Location="private-source/pll_60" Library="not mapped"/>
+  <Mappings Location="Common Libraries/STD" Library="std"/>
+  <Mappings Location="" Library="work"/>
+</com.sigasi.hdt.shared.librarymapping.model:LibraryMappings>
